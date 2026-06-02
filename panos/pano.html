@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>360 Panorama Viewer</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.css">
+<script src="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.js"></script>
+<style>
+  :root {
+    --bg: #0d0f12;
+    --accent: #ff6a13;        /* hazard orange — operational context */
+    --chip-bg: rgba(13,15,18,0.78);
+    --chip-fg: #e8eaed;
+    --chip-dim: #9aa0a6;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; background: var(--bg); overflow: hidden; }
+  #panorama { width: 100vw; height: 100vh; }
+
+  #chip {
+    position: fixed; top: 12px; left: 12px; z-index: 5;
+    max-width: min(80vw, 460px);
+    background: var(--chip-bg); color: var(--chip-fg);
+    border-left: 3px solid var(--accent);
+    padding: 8px 12px 8px 11px; border-radius: 2px;
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    box-shadow: 0 2px 14px rgba(0,0,0,0.45);
+    font-family: var(--mono); line-height: 1.35; pointer-events: none;
+    opacity: 0; transform: translateY(-4px);
+    animation: chipIn 0.45s ease 0.15s forwards;
+  }
+  @keyframes chipIn { to { opacity: 1; transform: translateY(0); } }
+  #chip .title { font-size: 13px; font-weight: 600; letter-spacing: 0.2px; }
+  #chip .meta  { font-size: 11px; color: var(--chip-dim); margin-top: 2px; }
+  #chip.hidden { display: none; }
+
+  #msg {
+    position: fixed; inset: 0; z-index: 10;
+    display: none; align-items: center; justify-content: center;
+    text-align: center; padding: 24px;
+    font-family: var(--mono); color: var(--chip-dim); background: var(--bg);
+  }
+  #msg.show { display: flex; }
+  #msg .inner { max-width: 460px; }
+  #msg code { color: var(--accent); font-size: 12px; word-break: break-all; }
+</style>
+</head>
+<body>
+  <div id="panorama"></div>
+  <div id="chip" class="hidden">
+    <div class="title" id="chipTitle"></div>
+    <div class="meta" id="chipMeta"></div>
+  </div>
+  <div id="msg">
+    <div class="inner">
+      <p>No panorama specified.</p>
+      <p style="margin-top:8px">Single image:<br>
+        <code>pano.html?img=img/DJI_0001.JPG&amp;title=Site%201</code></p>
+      <p style="margin-top:8px">Mobile-safe tiles:<br>
+        <code>pano.html?tiles=tiles/0001&amp;title=Site%201</code></p>
+    </div>
+  </div>
+
+<script>
+(function () {
+  var qs    = new URLSearchParams(window.location.search);
+  var img   = qs.get('img');
+  var tiles = qs.get('tiles');
+
+  function num(k, d) { var v = parseFloat(qs.get(k)); return isNaN(v) ? d : v; }
+
+  // Options shared by both modes
+  function commonOpts() {
+    var o = {
+      autoLoad: true,
+      showZoomCtrl: true,
+      showFullscreenCtrl: true,
+      compass: false,                 // no true-north reference in these images
+      yaw:   num('heading', 0),       // initial facing; 0 = image center
+      pitch: num('pitch', 0),
+      hfov:  num('hfov', 100),
+      friction: 0.18
+    };
+    var ar = qs.get('autorotate');
+    if (ar !== null && ar !== '' && !isNaN(parseFloat(ar))) o.autoRotate = parseFloat(ar);
+    return o;
+  }
+
+  function showError(html) {
+    var m = document.getElementById('msg');
+    m.querySelector('.inner').innerHTML = html;
+    m.classList.add('show');
+  }
+
+  function start(cfg) {
+    var viewer = pannellum.viewer('panorama', cfg);
+    viewer.on('error', function (e) {
+      showError('<p>Panorama failed to load.</p><p style="margin-top:8px;font-size:11px">' + (e || '') + '</p>');
+    });
+
+    var title = qs.get('title') || '';
+    if (title) {
+      var chip = document.getElementById('chip');
+      document.getElementById('chipTitle').textContent = title;
+      var meta = qs.get('meta');
+      if (meta) document.getElementById('chipMeta').textContent = meta;
+      else document.getElementById('chipMeta').remove();
+      chip.classList.remove('hidden');
+    }
+  }
+
+  // --- Mode 1: multiresolution tiles (works on every device; preferred for mobile) ---
+  if (tiles) {
+    var base = tiles.replace(/\/$/, '');
+    fetch(base + '/config.json')
+      .then(function (r) { if (!r.ok) throw new Error('config.json ' + r.status); return r.json(); })
+      .then(function (j) {
+        var mr = j.multiRes || {};
+        mr.basePath = base;                       // serve tiles relative to this folder
+        var cfg = commonOpts();
+        cfg.type = 'multires';
+        cfg.multiRes = mr;
+        start(cfg);
+      })
+      .catch(function (err) {
+        showError('<p>Could not load tile set.</p><p style="margin-top:8px"><code>' +
+                  base + '/config.json</code></p><p style="margin-top:8px;font-size:11px">' + err + '</p>');
+      });
+    return;
+  }
+
+  // --- Mode 2: single equirectangular image (simple; desktop-safe) ---
+  if (img) {
+    var cfg = commonOpts();
+    cfg.type = 'equirectangular';
+    cfg.panorama = img;                            // absolute URL or path relative to this page
+    start(cfg);
+    return;
+  }
+
+  document.getElementById('msg').classList.add('show');
+})();
+</script>
+</body>
+</html>
