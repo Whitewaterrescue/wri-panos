@@ -9,7 +9,7 @@
 <!-- WRI sphere annotations. Source of truth: pano-tiles/annot/pano-annot.js; published here and
      to the other pano repo by deploy_pano_viewer.py, which restamps ?v= with a content hash.
      If this 404s the sphere still works -- it just shows no labels. -->
-<script src="pano-annot.js?v=7ba71ffc01e6"></script>
+<script src="pano-annot.js?v=ac9414c5b6b8"></script>
 <style>
   :root {
     --bg: #0d0f12;
@@ -134,7 +134,9 @@
 
     A.fetchAnnotations(key).then(function (row) {
       if (!row || !row.shapes || !row.shapes.length) return;
-      var overlay = A.Overlay(viewer).setShapes(row.shapes);
+      // notes:true lets a tap on a labelled shape open its detail card. A drag still pans:
+      // the overlay stays pointer-events:none and taps are detected on the container.
+      var overlay = A.Overlay(viewer, {notes: true}).setShapes(row.shapes);
       var btn = document.getElementById('labels');
       var txt = document.getElementById('labelsTxt');
       txt.textContent = 'Labels (' + row.shapes.length + ')';
@@ -142,6 +144,7 @@
       btn.addEventListener('click', function () {
         var on = !overlay.isVisible();
         overlay.setVisible(on);
+        if (!on) overlay.closeNote();      // hiding labels must hide an open detail card too
         btn.classList.toggle('off', !on);
         btn.setAttribute('aria-pressed', String(on));
       });

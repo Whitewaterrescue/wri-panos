@@ -34,11 +34,34 @@
 
   // On-imagery colours are cartography, not UI tokens, and deliberately do not follow the theme
   // (same rule as the GRP photo annotator).
-  var STYLE = {
-    point: { color: '#ffd21e', casing: 'rgba(0,0,0,0.60)' },
-    line:  { color: '#4da3ff', casing: 'rgba(0,0,0,0.60)' },
-    area:  { color: '#00e0b8', casing: 'rgba(0,0,0,0.60)', fill: 'rgba(0,224,184,0.16)' }
+  //
+  // A shape stores the palette KEY ("red"), never a hex, so these shades can be retuned later
+  // without migrating a single stored annotation -- the same reasoning that keeps pano_key
+  // host-independent. The meanings are the ones a responder already carries in their head.
+  var PALETTE = {
+    red:    { hex: '#ff3b30', means: 'hazard / exclusion' },
+    orange: { hex: '#ff8a1f', means: 'caution / warm zone' },
+    yellow: { hex: '#ffd21e', means: 'boom / containment' },
+    green:  { hex: '#22c55e', means: 'staging / safe' },
+    blue:   { hex: '#4da3ff', means: 'access / water' },
+    white:  { hex: '#f5f7fa', means: 'general' }
   };
+  var PALETTE_ORDER = ['red', 'orange', 'yellow', 'green', 'blue', 'white'];
+  // Defaults per kind, for shapes drawn before colours existed and for a shape saved without one.
+  var KIND_COLOR = { point: 'yellow', line: 'blue', area: 'green' };
+  var CASING = 'rgba(0,0,0,0.60)';
+
+  function hexToRgba(hex, a) {
+    var n = parseInt(hex.slice(1), 16);
+    return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')';
+  }
+
+  /** Resolved drawing style for a shape: its colour if it has a valid one, else the kind default. */
+  function styleOf(s) {
+    var key = (s && PALETTE[s.c]) ? s.c : (KIND_COLOR[s && s.kind] || 'blue');
+    var hex = PALETTE[key].hex;
+    return { key: key, color: hex, casing: CASING, fill: hexToRgba(hex, 0.16) };
+  }
 
   var MAX_SEG_DEG = 3;     // densification step: an edge is sampled every ~3 deg of arc
   var MAX_SAMPLES = 160;   // hard cap per edge, so a pathological shape cannot hang a frame
@@ -236,6 +259,7 @@
     var shapes = [];
     var visible = true;
     var dirty = true;
+    var labelHits = [];              // where each label chip landed this frame, for tap targeting
     var last = { yaw: NaN, pitch: NaN, hfov: NaN, w: 0, h: 0 };
     var raf = 0;
     var self = {};
@@ -244,21 +268,30 @@
     var gGeom = svgEl('g'); svg.appendChild(gGeom);
     var gEdit = svgEl('g'); svg.appendChild(gEdit);
 
-    function labelEl(text) {
+    function labelEl(text, st, hasNote) {
       var el = doc.createElement('div');
-      el.className = 'wri-annot-label';
+      el.className = 'wri-annot-label' + (hasNote ? ' wri-annot-has-note' : '');
       el.style.cssText =
         'position:absolute;left:0;top:0;max-width:220px;padding:3px 7px;border-radius:3px;' +
         'background:rgba(13,15,18,0.78);color:#e8eaed;font:600 12px/1.3 ui-monospace,' +
         '"SF Mono",Menlo,Consolas,monospace;white-space:nowrap;overflow:hidden;' +
         'text-overflow:ellipsis;box-shadow:0 1px 6px rgba(0,0,0,0.5);' +
-        '-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px)';
+        '-webkit-backdrop-filter:blur(4px);backdrop-filter:blur(4px);' +
+        'border-left:3px solid ' + st.color;       // ties the chip to the shape it names
       el.textContent = text;                       // labels are user text: never innerHTML
+      if (hasNote) {
+        // Affordance only -- the tap is caught on the container, so this stays pointer-events:none
+        // and can never swallow a drag that was meant to pan the sphere.
+        var i = doc.createElement('span');
+        i.textContent = ' ⓘ';
+        i.style.cssText = 'opacity:.85;font-weight:700';
+        el.appendChild(i);
+      }
       return el;
     }
 
     function drawShape(s, cam) {
-      var st = STYLE[s.kind] || STYLE.line;
+      var st = styleOf(s);
       var anchor = null;
 
       if (s.kind === 'point') {
@@ -322,6 +355,7 @@
     function render() {
       while (gGeom.firstChild) gGeom.removeChild(gGeom.firstChild);
       labels.textContent = '';
+      labelHits.length = 0;
       if (!visible) return;
 
       var cam = camOf(viewer);
@@ -333,13 +367,16 @@
         if (!a || !s.label) continue;
         // Keep labels near the viewport; a label chasing a point 8 screens away is just noise.
         if (a.x < -cam.w || a.x > 2 * cam.w || a.y < -cam.h || a.y > 2 * cam.h) continue;
-        var el = labelEl(s.label);
+        var el = labelEl(s.label, styleOf(s), !!s.note);
         // Centre with a percentage translate rather than measuring: reading offsetWidth here
         // would force a synchronous layout for every label on every frame the camera moves.
         el.style.transform = s.kind === 'point'
           ? 'translate(' + (a.x + 12) + 'px,' + a.y + 'px) translate(0,-50%)'
           : 'translate(' + a.x + 'px,' + (a.y - 10) + 'px) translate(-50%,-100%)';
         labels.appendChild(el);
+        // Remember where the chip landed so a tap on the LABEL opens its detail, not just a tap
+        // on the geometry -- on a phone the chip is often the bigger target.
+        labelHits.push({ shape: s, x: a.x, y: a.y, kind: s.kind });
       }
       if (opts.onRender) opts.onRender(cam, gEdit);
     }
@@ -364,8 +401,89 @@
     self.root = root;
     self.start = function () { if (!raf) raf = global.requestAnimationFrame(tick); return self; };
     self.stop = function () { if (raf) global.cancelAnimationFrame(raf); raf = 0; return self; };
+    /* ---- detail notes ------------------------------------------------------------------
+       A shape can carry a longer `note` ("boats right, cars left; clear the lot by 1700").
+       Tapping it opens a card. Enabled with {notes:true} -- the ANNOTATOR leaves it off, because
+       there a tap means "place a vertex".
+
+       Tap detection lives on the container and the overlay stays pointer-events:none throughout,
+       so a drag always reaches Pannellum and pans the sphere. A tap is a pointer that moved less
+       than TAP_PX, exactly the rule the annotator uses.                                        */
+    var card = null, tapStart = null;
+    var TAP_PX = 8;
+
+    function closeNote() { if (card) { card.parentNode && card.parentNode.removeChild(card); card = null; } }
+
+    function openNote(s) {
+      closeNote();
+      var st = styleOf(s);
+      card = doc.createElement('div');
+      card.className = 'wri-annot-note';
+      card.style.cssText =
+        'position:absolute;left:50%;bottom:16px;transform:translateX(-50%);z-index:9;' +
+        'width:min(92%,420px);max-height:45%;overflow-y:auto;pointer-events:auto;' +
+        'background:rgba(13,15,18,0.92);color:#e8eaed;border-left:3px solid ' + st.color + ';' +
+        'border-radius:3px;padding:12px 38px 12px 13px;box-shadow:0 4px 20px rgba(0,0,0,0.55);' +
+        'font:400 13px/1.45 ui-monospace,"SF Mono",Menlo,Consolas,monospace;' +
+        '-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)';
+      var h = doc.createElement('div');
+      h.style.cssText = 'font-weight:700;font-size:13.5px;margin-bottom:5px';
+      h.textContent = s.label || '(unnamed)';
+      var b = doc.createElement('div');
+      b.style.cssText = 'white-space:pre-wrap;color:#cfd3d6';
+      b.textContent = s.note || '';               // user text: never innerHTML
+      var x = doc.createElement('button');
+      x.type = 'button';
+      x.setAttribute('aria-label', 'Close');
+      x.textContent = '✕';
+      x.style.cssText = 'position:absolute;top:6px;right:6px;width:30px;height:30px;border:0;' +
+        'background:transparent;color:#9aa0a6;font-size:15px;cursor:pointer;line-height:1';
+      x.addEventListener('click', function (e) { e.stopPropagation(); closeNote(); });
+      card.appendChild(h); card.appendChild(b); card.appendChild(x);
+      root.appendChild(card);
+    }
+
+    /** Nearest shape WITH a note to a screen point: its label chip first, then its geometry. */
+    function noteAt(clientX, clientY) {
+      var rect = host.getBoundingClientRect();
+      var sp = { x: clientX - rect.left, y: clientY - rect.top };
+      var i;
+      for (i = labelHits.length - 1; i >= 0; i--) {
+        var L = labelHits[i];
+        if (!L.shape.note) continue;
+        // The chip is drawn above a line/area anchor and to the right of a point.
+        var cx = L.kind === 'point' ? L.x + 12 + 60 : L.x;
+        var cy = L.kind === 'point' ? L.y : L.y - 10 - 11;
+        if (Math.abs(sp.x - cx) <= 80 && Math.abs(sp.y - cy) <= 16) return L.shape;
+      }
+      var hit = self.hitTest(clientX, clientY, 22);
+      return hit && hit.shape.note ? hit.shape : null;
+    }
+
+    function onDown(e) { tapStart = { x: e.clientX, y: e.clientY, id: e.pointerId }; }
+    function onUp(e) {
+      if (!tapStart || e.pointerId !== tapStart.id) { tapStart = null; return; }
+      var moved = Math.hypot(e.clientX - tapStart.x, e.clientY - tapStart.y);
+      tapStart = null;
+      if (moved > TAP_PX) return;                 // that was a pan
+      var s = noteAt(e.clientX, e.clientY);
+      if (s) openNote(s); else closeNote();
+    }
+
+    if (opts.notes) {
+      host.addEventListener('pointerdown', onDown, true);
+      host.addEventListener('pointerup', onUp, true);
+    }
+    self.openNote = openNote;
+    self.closeNote = closeNote;
+
     self.destroy = function () {
       self.stop();
+      closeNote();
+      if (opts.notes) {
+        host.removeEventListener('pointerdown', onDown, true);
+        host.removeEventListener('pointerup', onUp, true);
+      }
       if (root.parentNode) root.parentNode.removeChild(root);
     };
 
@@ -474,11 +592,21 @@
     };
   }
 
+  var MAX_NOTE = 600;
+
   function validShape(s) {
     if (!s || ['point', 'line', 'area'].indexOf(s.kind) < 0) return false;
     if (!Array.isArray(s.pts) || !s.pts.length) return false;
     var need = s.kind === 'point' ? 1 : (s.kind === 'area' ? 3 : 2);
     if (s.pts.length < need) return false;
+    // `c` and `note` are optional and arrived after the first shapes were drawn, so a shape
+    // without them stays valid; a bad value is dropped rather than failing the whole shape
+    // (styleOf falls back to the kind default, and an over-long note is truncated on read).
+    if (s.c != null && !PALETTE[s.c]) delete s.c;
+    if (s.note != null) {
+      if (typeof s.note !== 'string') delete s.note;
+      else if (s.note.length > MAX_NOTE) s.note = s.note.slice(0, MAX_NOTE);
+    }
     return s.pts.every(function (p) {
       return Array.isArray(p) && p.length === 2 && isFinite(p[0]) && isFinite(p[1]) &&
              Math.abs(p[1]) <= 90;
@@ -529,7 +657,11 @@
     SOURCE_URL: SOURCE_URL,
     VIEW_URL: VIEW_URL,
     ORG_ID: ORG_ID,
-    STYLE: STYLE,
+    PALETTE: PALETTE,
+    PALETTE_ORDER: PALETTE_ORDER,
+    KIND_COLOR: KIND_COLOR,
+    MAX_NOTE: MAX_NOTE,
+    styleOf: styleOf,
     SET_ALIAS: SET_ALIAS,
     panoKey: panoKey,
     project: project,
