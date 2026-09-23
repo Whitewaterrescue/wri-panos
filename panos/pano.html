@@ -6,6 +6,10 @@
 <title>360 Panorama Viewer</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.css">
 <script src="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.js"></script>
+<!-- WRI sphere annotations. Source of truth: pano-tiles/annot/pano-annot.js; published here and
+     to the other pano repo by deploy_pano_viewer.py, which restamps ?v= with a content hash.
+     If this 404s the sphere still works -- it just shows no labels. -->
+<script src="pano-annot.js?v=7ba71ffc01e6"></script>
 <style>
   :root {
     --bg: #0d0f12;
@@ -43,6 +47,22 @@
     font-family: var(--mono); color: var(--chip-dim); background: var(--bg);
   }
   #msg.show { display: flex; }
+  #labels {
+    position: fixed; bottom: 12px; left: 12px; z-index: 6;
+    display: none; align-items: center; gap: 6px;
+    background: var(--chip-bg); color: var(--chip-fg);
+    border: 0; border-left: 3px solid var(--accent);
+    padding: 9px 12px; border-radius: 2px; cursor: pointer;
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    box-shadow: 0 2px 14px rgba(0,0,0,0.45);
+    font-family: var(--mono); font-size: 12px; font-weight: 600; letter-spacing: 0.2px;
+    min-height: 40px;                       /* thumb-sized: this gets tapped on a phone */
+  }
+  #labels.show { display: flex; }
+  #labels.off { color: var(--chip-dim); border-left-color: var(--chip-dim); }
+  #labels .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); }
+  #labels.off .dot { background: transparent; box-shadow: inset 0 0 0 1.5px var(--chip-dim); }
+
   #msg .inner { max-width: 460px; }
   #msg code { color: var(--accent); font-size: 12px; word-break: break-all; }
 </style>
@@ -53,6 +73,9 @@
     <div class="title" id="chipTitle"></div>
     <div class="meta" id="chipMeta"></div>
   </div>
+  <button id="labels" type="button" aria-pressed="true">
+    <span class="dot"></span><span id="labelsTxt">Labels</span>
+  </button>
   <div id="msg">
     <div class="inner">
       <p>No panorama specified.</p>
@@ -94,11 +117,51 @@
     m.classList.add('show');
   }
 
+  // --- Annotations -------------------------------------------------------------------------
+  // Labels drawn on this sphere by the 360 Annotator, in yaw/pitch. Entirely additive: every
+  // failure path here (no pano-annot.js, no table, no token, bad JSON, no row) ends with the
+  // sphere rendering exactly as it did before annotations existed.
+  //
+  // With a WRI-org session in localStorage (the Field App and this page share one Pages origin)
+  // we read the org table and see everything. Anonymously -- the public gateway, a shared link,
+  // an ICP TV -- we read the public view, which only returns spheres someone explicitly flagged
+  // for the gateway.
+  function initAnnotations(viewer) {
+    var A = window.WRIPanoAnnot;
+    if (!A) return;                                  // script blocked or 404: nothing to do
+    var key = A.panoKey(window.location.href);
+    if (!key) return;
+
+    A.fetchAnnotations(key).then(function (row) {
+      if (!row || !row.shapes || !row.shapes.length) return;
+      var overlay = A.Overlay(viewer).setShapes(row.shapes);
+      var btn = document.getElementById('labels');
+      var txt = document.getElementById('labelsTxt');
+      txt.textContent = 'Labels (' + row.shapes.length + ')';
+      btn.classList.add('show');
+      btn.addEventListener('click', function () {
+        var on = !overlay.isVisible();
+        overlay.setVisible(on);
+        btn.classList.toggle('off', !on);
+        btn.setAttribute('aria-pressed', String(on));
+      });
+    }).catch(function () { /* labels are a bonus, never a reason to fail the sphere */ });
+  }
+
   function start(cfg) {
     var viewer = pannellum.viewer('panorama', cfg);
     viewer.on('error', function (e) {
       showError('<p>Panorama failed to load.</p><p style="margin-top:8px;font-size:11px">' + (e || '') + '</p>');
     });
+    // Test handle. The headless checks drive the camera through this; there is nothing here a
+    // reader of the page could not already reach through the DOM.
+    window.__wriViewer = viewer;
+    // The overlay reads the canvas, so wait for the renderer -- but a MULTIRES scene has nothing
+    // to preload and Pannellum fires 'load' synchronously inside pannellum.viewer() above, before
+    // any handler can be attached. Check the flag first; only fall back to the event.
+    function annotate() { try { initAnnotations(viewer); } catch (e) {} }
+    if (viewer.isLoaded && viewer.isLoaded()) annotate();
+    else viewer.on('load', annotate);
 
     var title = qs.get('title') || '';
     if (title) {
