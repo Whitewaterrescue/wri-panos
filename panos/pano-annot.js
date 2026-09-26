@@ -51,6 +51,10 @@
   var KIND_COLOR = { point: 'yellow', line: 'blue', area: 'green' };
   var CASING = 'rgba(0,0,0,0.60)';
 
+  // Flow arrows are a fixed cartographic symbol, not a palette colour -- exactly like the GRP
+  // photo annotator's flow/north/boom arrows, which never follow the user's colour choice either.
+  var FLOW_COLOR = '#1e78ff';
+
   function hexToRgba(hex, a) {
     var n = parseInt(hex.slice(1), 16);
     return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')';
@@ -58,6 +62,9 @@
 
   /** Resolved drawing style for a shape: its colour if it has a valid one, else the kind default. */
   function styleOf(s) {
+    if (s && s.kind === 'flow') {
+      return { key: 'flow', color: FLOW_COLOR, casing: CASING, fill: hexToRgba(FLOW_COLOR, 0.16) };
+    }
     var key = (s && PALETTE[s.c]) ? s.c : (KIND_COLOR[s && s.kind] || 'blue');
     var hex = PALETTE[key].hex;
     return { key: key, color: hex, casing: CASING, fill: hexToRgba(hex, 0.16) };
@@ -335,9 +342,43 @@
           line.setAttribute('stroke-linejoin', 'round');
           gGeom.appendChild(casing); gGeom.appendChild(line);
         }
+        if (s.kind === 'flow') drawArrowHead(s, cam, runs, st);
         anchor = anchorOf(runs);
       }
       return anchor;
+    }
+
+    var HEAD_LEN = 15, HEAD_W = 9;   // fixed screen px -- zoom-invariant, like every other stroke width here
+
+    function headPathD(tip, ang, len, w) {
+      var bx = tip.x - Math.cos(ang) * len, by = tip.y - Math.sin(ang) * len;
+      var px = -Math.sin(ang), py = Math.cos(ang);
+      return 'M' + tip.x.toFixed(1) + ' ' + tip.y.toFixed(1) +
+        'L' + (bx + px * w).toFixed(1) + ' ' + (by + py * w).toFixed(1) +
+        'L' + (bx - px * w).toFixed(1) + ' ' + (by - py * w).toFixed(1) + 'Z';
+    }
+
+    /**
+     * Arrowhead at a flow shape's tip (pts[1]), oriented along the screen-space tangent of the
+     * last visible run -- not the raw yaw/pitch delta -- so it follows the great-circle curve.
+     * Skipped entirely if the true tip is behind/beside the camera: a head drawn where the run
+     * happens to get clipped would point at nothing.
+     */
+    function drawArrowHead(s, cam, runs, st) {
+      var tipYaw = s.pts[1][0], tipPitch = s.pts[1][1];
+      var tip = project(cam, tipYaw, tipPitch);
+      if (tip.z <= NEAR_Z) return;
+      var last = runs[runs.length - 1];
+      if (!last || last.length < 2) return;
+      var prev = last[last.length - 2];
+      var ang = Math.atan2(tip.y - prev.y, tip.x - prev.x);
+      var casing = svgEl('path');
+      casing.setAttribute('d', headPathD(tip, ang, HEAD_LEN + 2, HEAD_W + 2));
+      casing.setAttribute('fill', st.casing);
+      var head = svgEl('path');
+      head.setAttribute('d', headPathD(tip, ang, HEAD_LEN, HEAD_W));
+      head.setAttribute('fill', st.color);
+      gGeom.appendChild(casing); gGeom.appendChild(head);
     }
 
     /** Label anchor: the middle of the longest visible run, or the centroid for a closed area. */
@@ -381,8 +422,7 @@
       if (opts.onRender) opts.onRender(cam, gEdit);
     }
 
-    function tick() {
-      raf = global.requestAnimationFrame(tick);
+    function syncNow() {
       var cv;
       try { cv = camOf(viewer); } catch (e) { return; }      // viewer torn down mid-frame
       if (!dirty && cv.yaw === last.yaw && cv.pitch === last.pitch && cv.hfov === last.hfov &&
@@ -390,6 +430,38 @@
       last = cv; dirty = false;
       render();
     }
+
+    function tick() {
+      raf = global.requestAnimationFrame(tick);
+      syncNow();
+    }
+
+    /*
+     * Pannellum's own per-frame loop draws the WebGL canvas using the CURRENT yaw/pitch/hfov,
+     * then -- in the SAME synchronous call, only while something is moving -- advances yaw/pitch
+     * for the NEXT frame. Our rAF loop above is a separate, independent callback: depending on
+     * browser scheduling it can run either before or after Pannellum's per-frame update, and when
+     * it runs after, it reads the value Pannellum just advanced to for NEXT frame rather than the
+     * one that was just painted -- a small but visible "swim" during any pan, fling, or autorotate.
+     *
+     * Pannellum has no public per-frame event, but it unconditionally touches every hotspot's
+     * `style` attribute on every one of those internal frames (to show/hide/reposition it) -- so a
+     * hidden, otherwise-inert hotspot added through the public addHotSpot() API gives us a
+     * MutationObserver signal fired in the exact same synchronous pass that drew this frame,
+     * sidestepping the rAF race entirely. The rAF loop above stays as a fallback (older embedded
+     * webviews without MutationObserver, or a resize with no camera change).
+     */
+    var beaconId = 'wri-annot-sync-' + Math.random().toString(36).slice(2);
+    var beaconMo = null;
+    try {
+      viewer.addHotSpot({ id: beaconId, yaw: 0, pitch: 0, cssClass: 'wri-annot-beacon' });
+      var beaconHs = (viewer.getConfig().hotSpots || []).filter(function (h) { return h.id === beaconId; })[0];
+      if (beaconHs && beaconHs.div && global.MutationObserver) {
+        beaconHs.div.style.cssText = 'display:none';    // never visible, never intercepts a tap
+        beaconMo = new global.MutationObserver(syncNow);
+        beaconMo.observe(beaconHs.div, { attributes: true, attributeFilter: ['style'] });
+      }
+    } catch (e) { beaconMo = null; }
 
     self.setShapes = function (list) { shapes = list || []; dirty = true; return self; };
     self.getShapes = function () { return shapes; };
@@ -480,6 +552,8 @@
     self.destroy = function () {
       self.stop();
       closeNote();
+      if (beaconMo) { try { beaconMo.disconnect(); } catch (e) {} beaconMo = null; }
+      try { viewer.removeHotSpot(beaconId); } catch (e) {}
       if (opts.notes) {
         host.removeEventListener('pointerdown', onDown, true);
         host.removeEventListener('pointerup', onUp, true);
@@ -595,7 +669,7 @@
   var MAX_NOTE = 600;
 
   function validShape(s) {
-    if (!s || ['point', 'line', 'area'].indexOf(s.kind) < 0) return false;
+    if (!s || ['point', 'line', 'area', 'flow'].indexOf(s.kind) < 0) return false;
     if (!Array.isArray(s.pts) || !s.pts.length) return false;
     var need = s.kind === 'point' ? 1 : (s.kind === 'area' ? 3 : 2);
     if (s.pts.length < need) return false;
@@ -660,6 +734,7 @@
     PALETTE: PALETTE,
     PALETTE_ORDER: PALETTE_ORDER,
     KIND_COLOR: KIND_COLOR,
+    FLOW_COLOR: FLOW_COLOR,
     MAX_NOTE: MAX_NOTE,
     styleOf: styleOf,
     SET_ALIAS: SET_ALIAS,
