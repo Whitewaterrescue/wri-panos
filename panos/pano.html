@@ -104,6 +104,48 @@
 
 <script>
 (function () {
+  // Backstop for the class of bug described in the CSS comment above. 100svh is the standards
+  // fix for Safari's own toolbar-resize model, but Cody found (2026-09-27, real iPhone, Chrome)
+  // that drift persisted even with 100svh live and cache-cleared -- Chrome for iOS is known to
+  // not follow the same "assume largest UI" viewport contract Safari's svh/dvh units target, so
+  // it can still resize the container out from under the canvas mid-gesture. This backstop does
+  // not depend on any browser's interpretation of a CSS viewport unit at all: it measures the
+  // visible area itself and PINS the panorama to that fixed pixel size, only re-measuring once
+  // resize/visualViewport-resize events stop firing for a bit. A transient mid-gesture resize
+  // (the address bar animating) never gets applied -- Pannellum keeps reading the same
+  // clientWidth/clientHeight it already had, so its canvas never has a reason to resize mid-drag.
+  // Only a genuinely settled resize (rotation, real window resize, done animating) is picked up.
+  (function pinViewportSize() {
+    var root = document.documentElement;
+    var pano = document.getElementById('panorama');
+    var pinTimer = null;
+    var lastW = window.innerWidth;
+
+    function pin() {
+      var vv = window.visualViewport;
+      var h = vv ? vv.height : window.innerHeight;
+      var w = vv ? vv.width : window.innerWidth;
+      root.style.height = h + 'px';
+      document.body.style.height = h + 'px';
+      pano.style.width = w + 'px';
+      pano.style.height = h + 'px';
+    }
+    pin();
+
+    function onResize() {
+      if (window.innerWidth !== lastW) {   // width changed: a real resize/rotation, not the
+        lastW = window.innerWidth;         // toolbar -- apply immediately, no debounce
+        clearTimeout(pinTimer);
+        pin();
+        return;
+      }
+      clearTimeout(pinTimer);              // height-only churn: hold the old (still-correct)
+      pinTimer = setTimeout(pin, 400);     // size until events stop firing for a moment
+    }
+    window.addEventListener('resize', onResize);
+    if (window.visualViewport) window.visualViewport.addEventListener('resize', onResize);
+  })();
+
   var qs    = new URLSearchParams(window.location.search);
   var img   = qs.get('img');
   var tiles = qs.get('tiles');
