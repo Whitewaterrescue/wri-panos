@@ -431,9 +431,29 @@
       render();
     }
 
+    var beaconActive = false;   // set once the hook (or its MutationObserver fallback) is wired
+
     function tick() {
       raf = global.requestAnimationFrame(tick);
-      syncNow();
+      var cv;
+      try { cv = camOf(viewer); } catch (e) { return; }
+      if (beaconActive) {
+        // The beacon already resyncs every yaw/pitch/hfov change at the exact right moment. This
+        // independent rAF loop competing for the SAME frame would otherwise sometimes run AFTER
+        // Pannellum's own per-frame update finishes (a structurally stable ordering, not a coin
+        // flip -- Pannellum's loop was already running before ours ever started), read the value
+        // it just advanced to for NEXT frame, and clobber the beacon's correct render with it --
+        // measured live: the beacon fired and rendered correctly, and this loop undid it a moment
+        // later, EVERY frame, which is why the fix below made no difference until this was found.
+        // While active, only step in for what the beacon can't see at all: a resize with no angle
+        // change (or an explicit invalidate()/setShapes() while nothing is panning).
+        if (dirty || cv.w !== last.w || cv.h !== last.h) { last = cv; dirty = false; render(); }
+        return;
+      }
+      if (!dirty && cv.yaw === last.yaw && cv.pitch === last.pitch && cv.hfov === last.hfov &&
+          cv.w === last.w && cv.h === last.h) return;
+      last = cv; dirty = false;
+      render();
     }
 
     /*
@@ -483,11 +503,14 @@
       var beaconHs = (viewer.getConfig().hotSpots || []).filter(function (h) { return h.id === beaconId; })[0];
       if (beaconHs && beaconHs.div) {
         beaconHs.div.style.cssText = 'display:none';    // never visible, never intercepts a tap
-        if (!hookStyleSetter(beaconHs.div, 'visibility', syncNow) && global.MutationObserver) {
+        if (hookStyleSetter(beaconHs.div, 'visibility', syncNow)) {
+          beaconActive = true;
+        } else if (global.MutationObserver) {
           // Fallback for an engine that won't let us shadow a CSSOM accessor: still same-frame
           // (a microtask beats waiting for our own next rAF turn), just not race-proof like the hook.
           beaconMo = new global.MutationObserver(syncNow);
           beaconMo.observe(beaconHs.div, { attributes: true, attributeFilter: ['style'] });
+          beaconActive = true;
         }
       }
     } catch (e) { beaconMo = null; }
