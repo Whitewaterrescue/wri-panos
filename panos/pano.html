@@ -20,8 +20,24 @@
     --mono: ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
   }
   * { margin: 0; padding: 0; box-sizing: border-box; }
-  html, body { width: 100%; height: 100%; background: var(--bg); overflow: hidden; }
-  #panorama { width: 100vw; height: 100vh; }
+  /* iOS Safari/Chrome (WebKit) resize the visual viewport LIVE as the address bar hides/shows
+     during a scroll/drag gesture -- 100vh/100% on a top-level page tracks that continuously.
+     Pannellum's own hotspot positioner and our overlay both read the canvas's CURRENT
+     clientWidth/clientHeight and are correct for whatever that is at the instant they run, but the
+     canvas's WebGL content only catches up to a NEW size on its own resize handling -- so mid
+     gesture, on a real device, the container (and therefore the canvas + overlay, both correctly
+     sized for "now") can be a different height than what the canvas has actually re-rendered at,
+     for the fraction of a second until it catches up. 100svh ("small viewport height") always
+     assumes the address bar is SHOWN and never changes size, which removes the resize entirely
+     rather than chasing where in the pipeline it gets picked up. Kept insulated from this class of
+     bug entirely: the 360 Annotator editor panel, which is never a top-level page (always an
+     iframe) and sizes via flex/100% of its own iframe box, not a viewport unit -- confirmed
+     unaffected by Cody 2026-09-27 testing every sphere there with none drifting, only the
+     standalone viewer (this file). 100vh first as a fallback for a browser that doesn't know
+     100svh; CSS ignores a value it doesn't recognize, so a modern browser applies the second,
+     overriding declaration and an old one stays on the first. */
+  html, body { width: 100%; height: 100%; height: 100svh; background: var(--bg); overflow: hidden; }
+  #panorama { width: 100vw; width: 100svw; height: 100vh; height: 100svh; }
 
   #chip {
     position: fixed; top: 12px; left: 12px; z-index: 5;
