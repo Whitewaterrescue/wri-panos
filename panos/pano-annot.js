@@ -466,54 +466,43 @@
      * pan, fling, or autorotate. Measured live against the real library: a consistent few px per
      * frame during a drag, growing with angular speed.
      *
-     * A MutationObserver on a hotspot's `style` attribute does NOT fix this, despite firing "in the
-     * same frame" -- it is a MICROTASK, which only runs after Pannellum's `ca()` has ENTIRELY
-     * finished (repositioning included, but so has that same call's yaw-advancing step). By the
-     * time the callback runs, the advance has already happened; this was tried and measured to make
-     * no difference against a live drag.
+     * Two things that look like fixes and are NOT, both tried and measured live before this one:
+     *  - A MutationObserver on a hotspot's `style` attribute: despite firing "in the same frame", it
+     *    is a MICROTASK, which only runs after Pannellum's `ca()` has ENTIRELY finished (the
+     *    yaw-advancing step included). By the time the callback runs, the advance already happened.
+     *  - Shadowing a hotspot div's `style.visibility` setter with Object.defineProperty: this DOES
+     *    run synchronously inside Pannellum's own call on the engine it was built and measured
+     *    against (desktop Chrome) -- but CSSStyleDeclaration exposes each CSS property as an own,
+     *    per-instance exotic property (a "legacy platform object"), not a normal prototype accessor,
+     *    and WebKit (every iOS browser, "Chrome" included -- Apple mandates the engine, not just
+     *    Safari) is free to refuse or silently ignore shadowing it. Measured live on iOS Chrome:
+     *    the drift was back, unchanged, because the hook silently never took effect there and this
+     *    fell all the way back to the (non-fixing) MutationObserver path.
      *
-     * What actually works: Pannellum repositions every hotspot by doing a plain
-     * `hotspot.div.style.visibility = "..."` (always, both the shown and hidden branch) on a div WE
-     * created and handed it via the public addHotSpot() API. Shadowing that ONE instance's
-     * `visibility` setter runs our callback SYNCHRONOUSLY, inside Pannellum's own call, at the exact
-     * point it repositions hotspots and BEFORE it advances yaw/pitch for next frame -- the one
-     * window external code can actually observe correctly, since nothing else can run between two
-     * statements of someone else's synchronous function.
-     *
-     * CSSStyleDeclaration exposes each CSS property as an own, per-instance exotic property (a
-     * "legacy platform object"), NOT a normal accessor on its prototype -- so there is no existing
-     * descriptor to look up and wrap. Forwarding through the always-available getPropertyValue /
-     * setProperty methods sidesteps that entirely and needs no descriptor at all (verified against a
-     * real div.style in Chrome: the shadowed setter fires synchronously and the value still sets).
+     * What actually works, and needs no DOM/CSSOM trick at all: Pannellum's `Fa()` -- the function
+     * that draws the canvas and repositions every hotspot -- calls `viewer.getRenderer().getCanvas()`
+     * as its VERY FIRST statement, unconditionally, before touching a single hotspot and before
+     * `ga()` (the state-advancing step) ever runs. `getRenderer()` returns a plain JS object; wrapping
+     * its `getCanvas` method is ordinary property assignment on an ordinary object -- ES5, no
+     * exotic/host-object behavior involved, so there is no engine-specific escape hatch for it to
+     * decline. Our own camOf() also calls getCanvas() (to read canvas width/height), which is what
+     * the reentrancy guard below is for.
      */
-    var beaconId = 'wri-annot-sync-' + Math.random().toString(36).slice(2);
-    var beaconMo = null;
-    function hookStyleSetter(div, prop, cb) {
-      try {
-        Object.defineProperty(div.style, prop, {
-          configurable: true,
-          get: function () { return this.getPropertyValue(prop); },
-          set: function (v) { this.setProperty(prop, v); cb(); }
-        });
-        return true;
-      } catch (e) { return false; }
-    }
+    var patchedCanvas = false;
     try {
-      viewer.addHotSpot({ id: beaconId, yaw: 0, pitch: 0, cssClass: 'wri-annot-beacon' });
-      var beaconHs = (viewer.getConfig().hotSpots || []).filter(function (h) { return h.id === beaconId; })[0];
-      if (beaconHs && beaconHs.div) {
-        beaconHs.div.style.cssText = 'display:none';    // never visible, never intercepts a tap
-        if (hookStyleSetter(beaconHs.div, 'visibility', syncNow)) {
-          beaconActive = true;
-        } else if (global.MutationObserver) {
-          // Fallback for an engine that won't let us shadow a CSSOM accessor: still same-frame
-          // (a microtask beats waiting for our own next rAF turn), just not race-proof like the hook.
-          beaconMo = new global.MutationObserver(syncNow);
-          beaconMo.observe(beaconHs.div, { attributes: true, attributeFilter: ['style'] });
-          beaconActive = true;
-        }
+      var renderer = viewer.getRenderer();
+      var origGetCanvas = renderer && renderer.getCanvas;
+      if (typeof origGetCanvas === 'function') {
+        var inSync = false;
+        renderer.getCanvas = function () {
+          var result = origGetCanvas.apply(this, arguments);
+          if (!inSync) { inSync = true; try { syncNow(); } finally { inSync = false; } }
+          return result;
+        };
+        patchedCanvas = true;
+        beaconActive = true;
       }
-    } catch (e) { beaconMo = null; }
+    } catch (e) { patchedCanvas = false; }
 
     self.setShapes = function (list) { shapes = list || []; dirty = true; return self; };
     self.getShapes = function () { return shapes; };
@@ -604,8 +593,7 @@
     self.destroy = function () {
       self.stop();
       closeNote();
-      if (beaconMo) { try { beaconMo.disconnect(); } catch (e) {} beaconMo = null; }
-      try { viewer.removeHotSpot(beaconId); } catch (e) {}
+      if (patchedCanvas) { try { renderer.getCanvas = origGetCanvas; } catch (e) {} patchedCanvas = false; }
       if (opts.notes) {
         host.removeEventListener('pointerdown', onDown, true);
         host.removeEventListener('pointerup', onUp, true);
