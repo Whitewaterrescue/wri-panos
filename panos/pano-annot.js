@@ -437,29 +437,58 @@
     }
 
     /*
-     * Pannellum's own per-frame loop draws the WebGL canvas using the CURRENT yaw/pitch/hfov,
-     * then -- in the SAME synchronous call, only while something is moving -- advances yaw/pitch
-     * for the NEXT frame. Our rAF loop above is a separate, independent callback: depending on
-     * browser scheduling it can run either before or after Pannellum's per-frame update, and when
-     * it runs after, it reads the value Pannellum just advanced to for NEXT frame rather than the
-     * one that was just painted -- a small but visible "swim" during any pan, fling, or autorotate.
+     * Pannellum's own per-frame loop (`ca` in the minified build) draws the WebGL canvas using the
+     * CURRENT yaw/pitch/hfov, then -- in the SAME synchronous call, only while something is moving
+     * -- advances yaw/pitch for the NEXT frame. Our rAF loop above is a separate, independent
+     * callback: depending on browser scheduling it can run either before or after Pannellum's
+     * per-frame update, and when it runs after, it reads the value Pannellum just advanced to for
+     * NEXT frame rather than the one that was just painted -- a small but visible "swim" during any
+     * pan, fling, or autorotate. Measured live against the real library: a consistent few px per
+     * frame during a drag, growing with angular speed.
      *
-     * Pannellum has no public per-frame event, but it unconditionally touches every hotspot's
-     * `style` attribute on every one of those internal frames (to show/hide/reposition it) -- so a
-     * hidden, otherwise-inert hotspot added through the public addHotSpot() API gives us a
-     * MutationObserver signal fired in the exact same synchronous pass that drew this frame,
-     * sidestepping the rAF race entirely. The rAF loop above stays as a fallback (older embedded
-     * webviews without MutationObserver, or a resize with no camera change).
+     * A MutationObserver on a hotspot's `style` attribute does NOT fix this, despite firing "in the
+     * same frame" -- it is a MICROTASK, which only runs after Pannellum's `ca()` has ENTIRELY
+     * finished (repositioning included, but so has that same call's yaw-advancing step). By the
+     * time the callback runs, the advance has already happened; this was tried and measured to make
+     * no difference against a live drag.
+     *
+     * What actually works: Pannellum repositions every hotspot by doing a plain
+     * `hotspot.div.style.visibility = "..."` (always, both the shown and hidden branch) on a div WE
+     * created and handed it via the public addHotSpot() API. Shadowing that ONE instance's
+     * `visibility` setter runs our callback SYNCHRONOUSLY, inside Pannellum's own call, at the exact
+     * point it repositions hotspots and BEFORE it advances yaw/pitch for next frame -- the one
+     * window external code can actually observe correctly, since nothing else can run between two
+     * statements of someone else's synchronous function.
+     *
+     * CSSStyleDeclaration exposes each CSS property as an own, per-instance exotic property (a
+     * "legacy platform object"), NOT a normal accessor on its prototype -- so there is no existing
+     * descriptor to look up and wrap. Forwarding through the always-available getPropertyValue /
+     * setProperty methods sidesteps that entirely and needs no descriptor at all (verified against a
+     * real div.style in Chrome: the shadowed setter fires synchronously and the value still sets).
      */
     var beaconId = 'wri-annot-sync-' + Math.random().toString(36).slice(2);
     var beaconMo = null;
+    function hookStyleSetter(div, prop, cb) {
+      try {
+        Object.defineProperty(div.style, prop, {
+          configurable: true,
+          get: function () { return this.getPropertyValue(prop); },
+          set: function (v) { this.setProperty(prop, v); cb(); }
+        });
+        return true;
+      } catch (e) { return false; }
+    }
     try {
       viewer.addHotSpot({ id: beaconId, yaw: 0, pitch: 0, cssClass: 'wri-annot-beacon' });
       var beaconHs = (viewer.getConfig().hotSpots || []).filter(function (h) { return h.id === beaconId; })[0];
-      if (beaconHs && beaconHs.div && global.MutationObserver) {
+      if (beaconHs && beaconHs.div) {
         beaconHs.div.style.cssText = 'display:none';    // never visible, never intercepts a tap
-        beaconMo = new global.MutationObserver(syncNow);
-        beaconMo.observe(beaconHs.div, { attributes: true, attributeFilter: ['style'] });
+        if (!hookStyleSetter(beaconHs.div, 'visibility', syncNow) && global.MutationObserver) {
+          // Fallback for an engine that won't let us shadow a CSSOM accessor: still same-frame
+          // (a microtask beats waiting for our own next rAF turn), just not race-proof like the hook.
+          beaconMo = new global.MutationObserver(syncNow);
+          beaconMo.observe(beaconHs.div, { attributes: true, attributeFilter: ['style'] });
+        }
       }
     } catch (e) { beaconMo = null; }
 
