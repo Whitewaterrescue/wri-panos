@@ -169,6 +169,14 @@
     return o;
   }
 
+  // Every value that reaches the error card comes from the URL (?tiles=, ?img=) or an error
+  // string built from it, so it is escaped before it lands in innerHTML.
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c];
+    });
+  }
+
   function showError(html) {
     var m = document.getElementById('msg');
     m.querySelector('.inner').innerHTML = html;
@@ -212,7 +220,7 @@
   function start(cfg) {
     var viewer = pannellum.viewer('panorama', cfg);
     viewer.on('error', function (e) {
-      showError('<p>Panorama failed to load.</p><p style="margin-top:8px;font-size:11px">' + (e || '') + '</p>');
+      showError('<p>Panorama failed to load.</p><p style="margin-top:8px;font-size:11px">' + esc(e || '') + '</p>');
     });
     // Test handle. The headless checks drive the camera through this; there is nothing here a
     // reader of the page could not already reach through the DOM.
@@ -250,7 +258,7 @@
       })
       .catch(function (err) {
         showError('<p>Could not load tile set.</p><p style="margin-top:8px"><code>' +
-                  base + '/config.json</code></p><p style="margin-top:8px;font-size:11px">' + err + '</p>');
+                  esc(base) + '/config.json</code></p><p style="margin-top:8px;font-size:11px">' + esc(err) + '</p>');
       });
     return;
   }
