@@ -14,14 +14,14 @@
  *
  * 3D site models (2026-11-13, Cody): a link to the drone server's 3D page
  * (https://drone.whitewaterrescue.com/3d?m=…) opens in the same panel. That page asks the app around
- * it for a sign-in ('wri-3d-ready'); this script answers, to the drone server's origin only and only
- * to the frame it opened, with the app's own ArcGIS sign-in (exb_auth) and the picked incident, the
+ * it for a sign-in ('wri-3d-ready'); this script answers, to the drone server's origin only (the panel it opened,
+ * or the 3D Model widget on the viewer's toolbar), with the app's own ArcGIS sign-in (exb_auth) and the picked incident, the
  * same hand-over the Drone Video panel does. With no ArcGIS sign-in the page asks for the incident PIN.
  */
 (function () {
   'use strict';
   if (window.__wriPanoInApp) return;
-  window.__wriPanoInApp = '2026-11-13b';
+  window.__wriPanoInApp = '2026-11-13c';
   var RX = /^https:\/\/whitewaterrescue\.github\.io\/(wri-incident-panos|wri-panos)\/panos\/pano\.html(\?|#|$)/i;
   var DRONE = 'https://drone.whitewaterrescue.com';
   var RX3D = /^https:\/\/drone\.whitewaterrescue\.com\/3d(\?|#|$)/i;
@@ -73,8 +73,8 @@
   }
   window.addEventListener('message', function (e) {
     var d = e.data;
-    if (e.origin !== DRONE || !d || d.type !== 'wri-3d-ready' || !frame || e.source !== frame.contentWindow) return;
-    try { frame.contentWindow.postMessage({ type: 'wri-3d-auth', agol_token: exbToken(), incident: pickedIncident() }, DRONE); } catch (err) {}
+    if (e.origin !== DRONE || !d || d.type !== 'wri-3d-ready' || !e.source) return;   // any drone-server frame on this page: the panel above, or the toolbar's 3D Model widget
+    try { e.source.postMessage({ type: 'wri-3d-auth', agol_token: exbToken(), incident: pickedIncident() }, DRONE); } catch (err) {}
   });
 
   function open(url) {
