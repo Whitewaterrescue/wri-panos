@@ -11,12 +11,20 @@
  *    and a viewport-unit height would resize the sphere mid-gesture (the 2026-09-27 drift bug).
  *  - No history entries are added (the host app owns the URL); Back button or Esc closes.
  *  - Set window.WRI_PANO_INAPP_OFF = true before a click to switch it off.
+ *
+ * 3D site models (2026-11-13, Cody): a link to the drone server's 3D page
+ * (https://drone.whitewaterrescue.com/3d?m=…) opens in the same panel. That page asks the app around
+ * it for a sign-in ('wri-3d-ready'); this script answers, to the drone server's origin only and only
+ * to the frame it opened, with the app's own ArcGIS sign-in (exb_auth) and the picked incident, the
+ * same hand-over the Drone Video panel does. With no ArcGIS sign-in the page asks for the incident PIN.
  */
 (function () {
   'use strict';
   if (window.__wriPanoInApp) return;
-  window.__wriPanoInApp = '2026-11-13';
+  window.__wriPanoInApp = '2026-11-13b';
   var RX = /^https:\/\/whitewaterrescue\.github\.io\/(wri-incident-panos|wri-panos)\/panos\/pano\.html(\?|#|$)/i;
+  var DRONE = 'https://drone.whitewaterrescue.com';
+  var RX3D = /^https:\/\/drone\.whitewaterrescue\.com\/3d(\?|#|$)/i;
   var box = null, frame = null, lastFocus = null, pinT = null, pinW = 0;
 
   function css() {
@@ -48,10 +56,32 @@
   function onResize() { pin(false); }
   function onKey(e) { if (e.key === 'Escape' && box) { e.stopPropagation(); close(); } }
 
+  // the app's own ArcGIS sign-in + picked incident, for the 3D page (same as panels/drone-live)
+  function exbToken() {
+    var raw = null;
+    try { raw = localStorage.getItem('exb_auth') || sessionStorage.getItem('exb_auth'); } catch (e) { return null; }
+    try {
+      var a = JSON.parse(raw || 'null');
+      if (!a || !a.token) return null;
+      var exp = Number(a.expires);
+      return isFinite(exp) && exp < Date.now() ? null : a.token;
+    } catch (e) { return null; }
+  }
+  function pickedIncident() {
+    try { var w = window.top && window.top.__wriIncident; if (w && w.incident_id) return String(w.incident_id); } catch (e) {}
+    return '';
+  }
+  window.addEventListener('message', function (e) {
+    var d = e.data;
+    if (e.origin !== DRONE || !d || d.type !== 'wri-3d-ready' || !frame || e.source !== frame.contentWindow) return;
+    try { frame.contentWindow.postMessage({ type: 'wri-3d-auth', agol_token: exbToken(), incident: pickedIncident() }, DRONE); } catch (err) {}
+  });
+
   function open(url) {
     close();
     css();
-    var title = '360° view';
+    var is3d = RX3D.test(url);
+    var title = is3d ? '3D site model' : '360° view';
     try { title = new URL(url).searchParams.get('title') || title; } catch (e) {}
     lastFocus = document.activeElement;
     box = document.createElement('div');
@@ -67,7 +97,7 @@
     own.textContent = 'Own tab ↗';
     hd.appendChild(back); hd.appendChild(t); hd.appendChild(own);
     var st = document.createElement('div'); st.className = 'wpi-st';
-    var ld = document.createElement('div'); ld.className = 'wpi-ld'; ld.textContent = 'Loading 360° view…';
+    var ld = document.createElement('div'); ld.className = 'wpi-ld'; ld.textContent = is3d ? 'Loading 3D model…' : 'Loading 360° view…';
     frame = document.createElement('iframe');
     frame.title = title;
     frame.setAttribute('allow', 'fullscreen; accelerometer; gyroscope');
@@ -106,7 +136,7 @@
       if (n && n.tagName === 'A' && n.href) { a = n; break; }
     }
     if (!a && e.target && e.target.closest) a = e.target.closest('a[href]');
-    if (!a || !RX.test(a.href)) return;
+    if (!a || !(RX.test(a.href) || RX3D.test(a.href))) return;
     if (box && box.contains(a)) return;                                // the panel's own "Own tab" link
     e.preventDefault();
     e.stopImmediatePropagation();
