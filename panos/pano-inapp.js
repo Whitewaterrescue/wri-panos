@@ -21,7 +21,7 @@
 (function () {
   'use strict';
   if (window.__wriPanoInApp) return;
-  window.__wriPanoInApp = '2026-11-13c';
+  window.__wriPanoInApp = '2026-11-17';
   var RX = /^https:\/\/whitewaterrescue\.github\.io\/(wri-incident-panos|wri-panos)\/panos\/pano\.html(\?|#|$)/i;
   var DRONE = 'https://drone.whitewaterrescue.com';
   var RX3D = /^https:\/\/drone\.whitewaterrescue\.com\/3d(\?|#|$)/i;
@@ -67,10 +67,23 @@
       return isFinite(exp) && exp < Date.now() ? null : a.token;
     } catch (e) { return null; }
   }
+  // the incident this app is on: the viewer's / map's incident picker (incident-scope), else the incident the
+  // phone picked at the Field App's gate (localStorage wri_incident_choice, same origin)
   function pickedIncident() {
     try { var w = window.top && window.top.__wriIncident; if (w && w.incident_id) return String(w.incident_id); } catch (e) {}
+    try {
+      var c = JSON.parse(localStorage.getItem('wri_incident_choice') || 'null');
+      if (c && c.id && (!c.expires || Number(c.expires) > Date.now() || Date.parse(c.expires) > Date.now())) return String(c.id);
+    } catch (e) {}
     return '';
   }
+  // the app switched incident: every 3D frame on the page follows (Cody 2026-11-17)
+  window.addEventListener('wri-incident-change', function () {
+    var inc = pickedIncident();
+    Array.prototype.forEach.call(document.querySelectorAll('iframe'), function (f) {
+      try { if (f.contentWindow && RX3D.test(f.src || '')) f.contentWindow.postMessage({ type: 'wri-3d-incident', incident: inc }, DRONE); } catch (e) {}
+    });
+  });
   window.addEventListener('message', function (e) {
     var d = e.data;
     if (e.origin !== DRONE || !d || d.type !== 'wri-3d-ready' || !e.source) return;   // any drone-server frame on this page: the panel above, or the toolbar's 3D Model widget
