@@ -17,15 +17,24 @@
  * it for a sign-in ('wri-3d-ready'); this script answers, to the drone server's origin only (the panel it opened,
  * or the 3D Model widget on the viewer's toolbar), with the app's own ArcGIS sign-in (exb_auth) and the picked incident, the
  * same hand-over the Drone Video panel does. With no ArcGIS sign-in the page asks for the incident PIN.
+ *
+ * Dashboards (2026-11-17, Cody): on the RESPONSE VIEWERS only (page path …-viewer/), the dashboard row's links
+ * (Ops, Resource Manager, Planning via wri-field-app/apps/, Logistics, Safety) open in the same panel, so the viewer
+ * stays put; the panel's "Open in new tab" is the same banner-free link. The Apps Script apps inside the wrapper post
+ * to window.top, which is now this page: their 'wri-apps-*' messages are relayed down to the wrapper frame, and the Ops
+ * Live Map's 'wri-agol-token-request' is answered here with the viewer's ArcGIS sign-in — both only for frames
+ * inside the open panel.
  */
 (function () {
   'use strict';
   if (window.__wriPanoInApp) return;
-  window.__wriPanoInApp = '2026-11-17';
+  window.__wriPanoInApp = '2026-11-17b';
   var RX = /^https:\/\/whitewaterrescue\.github\.io\/(wri-incident-panos|wri-panos)\/panos\/pano\.html(\?|#|$)/i;
   var DRONE = 'https://drone.whitewaterrescue.com';
   var RX3D = /^https:\/\/drone\.whitewaterrescue\.com\/3d(\?|#|$)/i;
-  var box = null, frame = null, lastFocus = null, pinT = null, pinW = 0;
+  var RXDASH = /^https:\/\/whitewaterrescue\.github\.io\/(wri-field-app\/apps\/|wri-logistics\/|wri-safety\/)/i;
+  var IS_VIEWER = location.hostname === 'whitewaterrescue.github.io' && /^\/[^/]+-viewer\//i.test(location.pathname);
+  var box = null, frame = null, lastFocus = null, pinT = null, pinW = 0, isDash = false;
 
   function css() {
     if (document.getElementById('wri-pano-inapp-css')) return;
@@ -90,12 +99,46 @@
     try { e.source.postMessage({ type: 'wri-3d-auth', agol_token: exbToken(), incident: pickedIncident() }, DRONE); } catch (err) {}
   });
 
-  function open(url) {
+  // a frame somewhere inside the open dashboard panel (the wrapper, Google's frames, the app's own frame)
+  function inPanel(src) {
+    if (!box || !isDash || !frame || !src) return false;
+    var top = frame.contentWindow;
+    for (var w = src, i = 0; w && i < 8; i++) {
+      if (w === top) return true;
+      var p = null;
+      try { p = w.parent; } catch (e) { return false; }
+      if (!p || p === w) return false;
+      w = p;
+    }
+    return false;
+  }
+  window.addEventListener('message', function (e) {
+    var d = e.data;
+    if (!d || !IS_VIEWER || !e.source) return;
+    var g = false;
+    try { g = /\.googleusercontent\.com$/.test(new URL(e.origin).hostname); } catch (x) {}
+    if (!g || !inPanel(e.source)) return;
+    if (d.type === 'wri-agol-token-request') {          // same answer the wrapper gives (wri-field-app/apps/)
+      var raw = null;
+      try { raw = localStorage.getItem('exb_auth') || sessionStorage.getItem('exb_auth'); } catch (x) {}
+      try {
+        var a = JSON.parse(raw || 'null');
+        if (!a || !a.token) return;
+        e.source.postMessage({ type: 'wri-agol-token', token: a.token, username: a.email || '',
+          expiresAt: new Date(a.expires).getTime() || Date.now() + 1200000 }, e.origin);
+      } catch (x) {}
+    } else if (/^wri-apps-/.test(String(d.type || ''))) {
+      try { frame.contentWindow.postMessage({ type: 'wri-apps-relay', data: d, origin: e.origin }, location.origin); } catch (x) {}
+    }
+  });
+
+  function open(url, label) {
     close();
     css();
     var is3d = RX3D.test(url);
-    var title = is3d ? '3D site model' : '360° view';
-    try { title = new URL(url).searchParams.get('title') || title; } catch (e) {}
+    isDash = !is3d && RXDASH.test(url);
+    var title = is3d ? '3D site model' : isDash ? (label || 'Dashboard') : '360° view';
+    if (!isDash) try { title = new URL(url).searchParams.get('title') || title; } catch (e) {}
     lastFocus = document.activeElement;
     box = document.createElement('div');
     box.id = 'wri-pano-inapp';
@@ -104,16 +147,22 @@
     box.setAttribute('aria-label', title);
     var hd = document.createElement('div'); hd.className = 'wpi-hd';
     var back = document.createElement('button'); back.type = 'button'; back.className = 'wpi-back';
-    back.textContent = '← Back'; back.onclick = close;
+    back.textContent = isDash ? '← Back to map' : '← Back'; back.onclick = close;
     var t = document.createElement('div'); t.className = 'wpi-t'; t.textContent = title;
     var own = document.createElement('a'); own.className = 'wpi-own'; own.href = url; own.target = '_blank'; own.rel = 'noopener';
-    own.textContent = 'Own tab ↗';
+    own.textContent = isDash ? 'Open in new tab ↗' : 'Own tab ↗';
+    if (isDash) own.addEventListener('click', function () { setTimeout(close, 0); });   // the tab takes over; the map comes back
     hd.appendChild(back); hd.appendChild(t); hd.appendChild(own);
     var st = document.createElement('div'); st.className = 'wpi-st';
-    var ld = document.createElement('div'); ld.className = 'wpi-ld'; ld.textContent = is3d ? 'Loading 3D model…' : 'Loading 360° view…';
+    var ld = document.createElement('div'); ld.className = 'wpi-ld';
+    ld.textContent = is3d ? 'Loading 3D model…' : isDash ? 'Loading ' + title + '…' : 'Loading 360° view…';
     frame = document.createElement('iframe');
     frame.title = title;
-    frame.setAttribute('allow', 'fullscreen; accelerometer; gyroscope');
+    // dashboards: the same permissions the wrapper gives the apps (print/PDF popups, sign-in popup, camera, clipboard)
+    frame.setAttribute('allow', isDash ? 'geolocation; camera; microphone; clipboard-read; clipboard-write; fullscreen; web-share; autoplay'
+      : 'fullscreen; accelerometer; gyroscope');
+    if (isDash) frame.setAttribute('referrerpolicy', 'strict-origin-when-cross-origin');
+    if (isDash) st.style.background = '#fff';
     frame.setAttribute('allowfullscreen', '');
     frame.addEventListener('load', function () { ld.style.display = 'none'; });
     frame.src = url;
@@ -133,7 +182,7 @@
     document.removeEventListener('keydown', onKey, true);
     clearTimeout(pinT);
     try { frame.src = 'about:blank'; } catch (e) {}     // frees the WebGL sphere
-    box.remove(); box = frame = null; pinW = 0;
+    box.remove(); box = frame = null; pinW = 0; isDash = false;
     try { if (lastFocus && lastFocus.focus) lastFocus.focus({ preventScroll: true }); } catch (e) {}
     lastFocus = null;
   }
@@ -149,11 +198,12 @@
       if (n && n.tagName === 'A' && n.href) { a = n; break; }
     }
     if (!a && e.target && e.target.closest) a = e.target.closest('a[href]');
-    if (!a || !(RX.test(a.href) || RX3D.test(a.href))) return;
+    var dash = IS_VIEWER && a && RXDASH.test(a.href);
+    if (!a || !(RX.test(a.href) || RX3D.test(a.href) || dash)) return;
     if (box && box.contains(a)) return;                                // the panel's own "Own tab" link
     e.preventDefault();
     e.stopImmediatePropagation();
-    open(a.href);
+    open(a.href, dash ? String(a.textContent || a.getAttribute('aria-label') || a.title || '').replace(/\s+/g, ' ').trim() : '');
   }, true);
 
   window.WRIPanoInApp = { open: open, close: close, isOpen: function () { return !!box; } };
